@@ -2,32 +2,108 @@
 <html lang="es">
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>IMU Live • 3D (cero al inicio)</title>
+<title>IMU Live • 3D</title>
 <style>
-  body{margin:0;background:#0f1115;color:#eaeaea;font-family:system-ui,Segoe UI,Arial}
-  header{padding:12px 16px;border-bottom:1px solid #212638}
-  main{max-width:1200px;margin:0 auto;padding:16px;display:grid;gap:16px}
-  .card{background:#151924;border:1px solid #212638;border-radius:12px;padding:16px}
-  #scene{width:100%;height:520px;border-radius:10px;overflow:hidden}
+  :root{
+    --bg:#0b0e14; --card:#141b2d; --ink:#e8eefc; --muted:#9aa8c7; --edge:#1f2a44;
+    --ok:#48d597; --warn:#ffcf5a; --err:#ff6b6b;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:Inter,system-ui,Segoe UI,Arial}
+  header{display:flex;align-items:center;justify-content:space-between;gap:12px;
+    padding:14px 18px;border-bottom:1px solid var(--edge);background:linear-gradient(180deg,#0d1220,transparent)}
+  h1{font-size:18px;margin:0;font-weight:600}
+  .badge{display:inline-flex;align-items:center;gap:8px;padding:6px 10px;border-radius:999px;
+    background:#0f1526;border:1px solid var(--edge);color:var(--muted);font:12px/1 ui-monospace,Consolas}
+  .dot{width:8px;height:8px;border-radius:50%;background:var(--warn)}
+  .dot.ok{background:var(--ok)} .dot.err{background:var(--err)}
+  main{max-width:1200px;margin:0 auto;padding:18px;display:grid;gap:18px;grid-template-columns:1.6fr .9fr}
+  @media (max-width:980px){ main{grid-template-columns:1fr} }
+  .card{background:var(--card);border:1px solid var(--edge);border-radius:14px;overflow:hidden;position:relative}
+  .card .head{display:flex;align-items:center;justify-content:space-between;padding:12px 14px;border-bottom:1px solid var(--edge)}
+  .card .body{padding:14px}
+  #scene{width:100%;height:560px;background:#0c111b}
+  .toolbar{display:flex;flex-wrap:wrap;gap:8px}
+  .btn{background:#0f1629;border:1px solid var(--edge);color:var(--ink);padding:8px 10px;border-radius:10px;cursor:pointer;
+    font-size:13px;display:inline-flex;align-items:center;gap:8px;transition:.15s ease}
+  .btn:hover{transform:translateY(-1px);border-color:#2a3a66}
+  .kv{display:grid;grid-template-columns:auto 1fr;gap:6px 10px;font-family:ui-monospace,Consolas}
+  .kv .k{color:var(--muted)}
   .mono{font-family:ui-monospace,Consolas,monospace}
-  button{background:#2b3348;color:#fff;border:1px solid #39415a;border-radius:8px;padding:8px 12px;cursor:pointer}
-  button:disabled{opacity:.6;cursor:not-allowed}
+  footer{padding:12px 18px;color:#7e8db1;font-size:12px;opacity:.8}
+
+  /* --- Marcador grande superior --- */
+  .hero{
+  position:absolute; top:4px; left:0; right:0;
+  display:flex; justify-content:center;
+    pointer-events:none;
+  }
+  .hero-wrap{
+    text-align:center;
+    padding:6px 14px;
+    background:linear-gradient(180deg,#0b1226cc,#0b122666);
+    border:1px solid var(--edge);
+    border-radius:12px;
+    backdrop-filter: blur(4px);
+  }
+  .hero .vals{display:flex;gap:18px;justify-content:center;flex-wrap:wrap}
+  .hero .lbl{display:block;font:700 12px/1 ui-monospace,Consolas;color:#9fb3ff}
+  .hero .num{font:800 28px/1.1 ui-monospace,Consolas;color:#eaf1ff}
+  .hero .deg{font-size:.6em;opacity:.7;margin-left:4px}
 </style>
 
-<header><h1 style="margin:0;font-size:18px">IMU Live • 3D</h1></header>
-<main>
-  <div class="card">
-    <span>WebSocket: <b id="status">Conectando...</b></span>
-    <button id="btnReset" style="margin-left:12px">Recentrar</button>
-  </div>
+<header>
+  <h1>IMU Live • 3D</h1>
+  <div class="badge"><span id="dot" class="dot"></span><span id="wsTxt">Conectando…</span></div>
+</header>
 
-  <div class="card">
-    <h3 style="margin-top:0">Orientación (Three.js)</h3>
+<main>
+  <!-- 3D -->
+  <section class="card">
+    <div class="head">
+      <div class="toolbar">
+        <button id="btnCenter" class="btn">Centrar cámara</button>
+        <button id="btnZero" class="btn">Poner a cero</button>
+      </div>
+      <div style="color:#9aa8c7;font-size:12px">Arrastra para orbitar • rueda para zoom</div>
+    </div>
     <div id="scene"></div>
-    <div class="mono" id="euler" style="margin-top:8px">roll=0°, pitch=0°, yaw=0°</div>
-    <div class="mono" id="q">quat: —</div>
-  </div>
+
+    <!-- Marcador grande superior -->
+    <div class="hero">
+      <div class="hero-wrap">
+        <div class="vals">
+          <div><span class="lbl">ROLL</span><span class="num" id="heroRoll">0.0<span class="deg">°</span></span></div>
+          <div><span class="lbl">PITCH</span><span class="num" id="heroPitch">0.0<span class="deg">°</span></span></div>
+          <div><span class="lbl">YAW</span><span class="num" id="heroYaw">0.0<span class="deg">°</span></span></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Panel lateral -->
+  <aside class="card">
+    <div class="head"><strong>Telemetría</strong></div>
+    <div class="body">
+      <div class="kv" style="margin-bottom:14px">
+        <div class="k">Frecuencia</div><div><span id="freq">—</span> Hz</div>
+        <div class="k">Muestreo</div><div><span id="lat">—</span> ms</div>
+      </div>
+
+      <h3 style="margin:8px 0 6px;font-size:14px;color:#9aa8c7">Ángulos (ZYX)</h3>
+      <div class="kv mono" style="margin-bottom:14px">
+        <div class="k">Roll</div><div id="roll">0.0°</div>
+        <div class="k">Pitch</div><div id="pitch">0.0°</div>
+        <div class="k">Yaw</div><div id="yaw">0.0°</div>
+      </div>
+
+      <h3 style="margin:8px 0 6px;font-size:14px;color:#9aa8c7">Cuaternión</h3>
+      <div class="mono" id="q">w=1.000, x=0.000, y=0.000, z=0.000</div>
+    </div>
+  </aside>
 </main>
+
+<footer>Hecho con Three.js • © Tu Proyecto</footer>
 
 <script type="importmap">
 { "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.161.0/build/three.module.js" } }
@@ -37,97 +113,144 @@
 import * as THREE from "three";
 import { OrbitControls } from "https://cdn.jsdelivr.net/npm/three@0.161.0/examples/jsm/controls/OrbitControls.js";
 
-/* ====== Escena ====== */
+/* --- Escena --- */
 const cont = document.getElementById('scene');
 const renderer = new THREE.WebGLRenderer({ antialias:true });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 cont.appendChild(renderer.domElement);
 
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x0f1115);
+scene.background = new THREE.Color(0x0c111b);
 
 const camera = new THREE.PerspectiveCamera(50, 16/9, 0.01, 50);
 camera.position.set(1.6,1.1,1.8);
 
 const controls = new OrbitControls(camera, renderer.domElement);
-controls.target.set(0,0.06,0);
-controls.enableDamping = true;
 
-scene.add(new THREE.HemisphereLight(0xffffff,0x202430,0.9));
-const dir = new THREE.DirectionalLight(0xffffff,0.8); dir.position.set(2,3,2); scene.add(dir);
+scene.add(new THREE.HemisphereLight(0xffffff,0x202430,0.95));
+const dir = new THREE.DirectionalLight(0xffffff,0.9); dir.position.set(2,3,2);
+scene.add(dir);
 
 const ground = new THREE.Mesh(
-  new THREE.PlaneGeometry(6,6),
-  new THREE.MeshStandardMaterial({ color:0x1b2030, roughness:1 })
+  new THREE.PlaneGeometry(8,8),
+  new THREE.MeshStandardMaterial({ color:0x141a28, roughness:1 })
 );
-ground.rotation.x = -Math.PI/2; scene.add(ground);
-scene.add(new THREE.GridHelper(6, 30, 0x3a3f52, 0x252a38));
+ground.rotation.x = -Math.PI/2;
+scene.add(ground);
 
+// Objeto principal
 const box = new THREE.Mesh(
   new THREE.BoxGeometry(0.8,0.18,0.5),
   new THREE.MeshStandardMaterial({ metalness:0.2, roughness:0.6 })
 );
-box.position.y = 0.09; scene.add(box);
-scene.add(new THREE.AxesHelper(0.6));
+box.position.y = 0.09;
+scene.add(box);
+
+// Ejes fijos en el mundo
+const axes = new THREE.AxesHelper(1.2);
+scene.add(axes);
+
+// Cámara centrada al objeto
+controls.target.copy(box.position);
+controls.enableDamping = true;
 
 function resize(){
-  const w = cont.clientWidth||window.innerWidth, h = cont.clientHeight||520;
+  const w = cont.clientWidth||window.innerWidth, h = 560;
   renderer.setSize(w,h); camera.aspect = w/h; camera.updateProjectionMatrix();
 }
-window.addEventListener('resize', resize); resize();
+addEventListener('resize', resize); resize();
 (function loop(){ controls.update(); renderer.render(scene,camera); requestAnimationFrame(loop); })();
 
-/* ====== Mapeo fijo (YZX) ====== */
-function reorderYZX([x,y,z,w]) { return [y,z,x,w]; }
+function imuQuatToThree(arr){
+  let a = arr.map(Number);
+  let w,x,y,z;
 
-/* ====== Corrección a cero (autocalibración) ======
-   Guardamos q0 = (primer quat mapeado)^-1 y aplicamos:
-   q_final = q0 * q_mapeado
-   Así la primera pose siempre se ve como (0,0,0). */
-let q0 = null;             // corrección (inversa del primer quat)
-let lastMappedQ = null;    // para "Recentrar" bajo demanda
-
-const st = document.getElementById('status');
-const qEl = document.getElementById('q');
-const eulerEl = document.getElementById('euler');
-const btnReset = document.getElementById('btnReset');
-btnReset.onclick = () => {
-  if (lastMappedQ) {
-    q0 = lastMappedQ.clone().invert();   // nueva referencia = cero
+  // Detecta [w,x,y,z] vs [x,y,z,w]
+  if (Math.abs(a[0]) >= Math.max(Math.abs(a[1]), Math.abs(a[2]), Math.abs(a[3]))) {
+    [w,x,y,z] = a;          // [w,x,y,z]
+  } else {
+    [x,y,z,w] = a;          // [x,y,z,w]
   }
-};
 
-/* ====== WebSocket & datos ====== */
+  // --- Remapeo pedido: x→y, y→z, z→x ---
+  // Y además invertir X y Z (estaban al revés)
+  let nx = - y;  // X final = -Y del sensor
+  let ny = z;  // Y final =  Z del sensor
+  let nz = -x;  // Z final = -X del sensor
+
+  // --- NED → ENU (Three): invierte Y y Z del marco final ---
+  
+
+  return new THREE.Quaternion(nx, ny, nz, w).normalize();
+}
+
+
+
+/* --- UI refs --- */
+const dot = document.getElementById('dot');
+const wsTxt = document.getElementById('wsTxt');
+const rollEl = document.getElementById('roll');
+const pitchEl = document.getElementById('pitch');
+const yawEl = document.getElementById('yaw');
+const qEl = document.getElementById('q');
+const freqEl = document.getElementById('freq');
+const latEl = document.getElementById('lat');
+const heroRoll = document.getElementById('heroRoll');
+const heroPitch = document.getElementById('heroPitch');
+const heroYaw = document.getElementById('heroYaw');
+
+/* --- Controles --- */
+document.getElementById('btnCenter').onclick = ()=>{
+  camera.position.set(1.6,1.1,1.8);
+  controls.target.copy(box.position); controls.update();
+};
+let zeroQ = new THREE.Quaternion();
+document.getElementById('btnZero').onclick = ()=>{ zeroQ.copy(box.quaternion).invert(); };
+
+/* --- WebSocket --- */
 const ws = new WebSocket(`ws://${location.host}/ws`);
-ws.onopen  = ()=> st.textContent = 'Conectado';
-ws.onclose = ()=> st.textContent = 'Desconectado';
-ws.onerror = ()=> st.textContent = 'Error';
+ws.onopen  = ()=>{ wsTxt.textContent='Conectado'; dot.classList.add('ok'); dot.classList.remove('err'); };
+ws.onclose = ()=>{ wsTxt.textContent='Desconectado'; dot.classList.remove('ok'); };
+ws.onerror = ()=>{ wsTxt.textContent='Error'; dot.classList.add('err'); };
+
+let last = performance.now(), count = 0, lastShow = last;
 
 ws.onmessage = (ev)=>{
+  const t = performance.now(); count++;
+  if (t - lastShow > 1000){ freqEl.textContent = count.toFixed(0); latEl.textContent = (t - last).toFixed(0); count = 0; lastShow = t; }
+  last = t;
+
   try{
     const m = JSON.parse(ev.data);
-    if(!m || !m.quat) return;
-
-    // 1) mapeo YZX
-    const [x,y,z,w] = reorderYZX(m.quat);
-    const qMapped = new THREE.Quaternion(x,y,z,w);
-    lastMappedQ = qMapped.clone();
-
-    // 2) inicializar q0 la primera vez (cero al inicio)
-    if (!q0) q0 = qMapped.clone().invert();
-
-    // 3) aplicar corrección: q_final = q0 * qMapped
-    const qFinal = q0.clone().multiply(qMapped);
-    box.quaternion.copy(qFinal);
-
-    // 4) textos
-    qEl.textContent = 'quat: ['+ m.quat.map(v=>Number(v).toFixed(6)).join(', ') +']';
-    const e = new THREE.Euler().setFromQuaternion(qFinal, 'XYZ', true);
-    const roll  = THREE.MathUtils.radToDeg(e.x);
-    const pitch = THREE.MathUtils.radToDeg(e.y);
-    const yaw   = THREE.MathUtils.radToDeg(e.z);
-    eulerEl.textContent = `roll=${roll.toFixed(1)}°, pitch=${pitch.toFixed(1)}°, yaw=${yaw.toFixed(1)}°`;
+    if (Array.isArray(m.quat))      applyQuat(m.quat);
+    else if ('qw' in m)             applyQuat([m.qw,m.qx,m.qy,m.qz]);
+    else if (Array.isArray(m.euler)){
+      const [r,p,y] = m.euler.map(THREE.MathUtils.degToRad);
+      const e = new THREE.Euler(y,p,r,'ZYX');
+      setOrientation(new THREE.Quaternion().setFromEuler(e));
+    }
   }catch{}
 };
+
+function applyQuat(arr){ setOrientation(imuQuatToThree(arr)); }
+
+function setOrientation(qWorld){
+  const q = qWorld.clone().premultiply(zeroQ);
+  box.quaternion.copy(q);
+
+  const e = new THREE.Euler().setFromQuaternion(q,'ZYX');
+  const roll  = THREE.MathUtils.radToDeg(e.z);
+  const pitch = THREE.MathUtils.radToDeg(e.y);
+  const yaw   = THREE.MathUtils.radToDeg(e.x);
+
+  rollEl.textContent  = roll.toFixed(1)+'°';
+  pitchEl.textContent = pitch.toFixed(1)+'°';
+  yawEl.textContent   = yaw.toFixed(1)+'°';
+  qEl.textContent = `w=${q.w.toFixed(3)}, x=${q.x.toFixed(3)}, y=${q.y.toFixed(3)}, z=${q.z.toFixed(3)}`;
+
+  heroRoll.textContent  = roll.toFixed(1) + '°';
+  heroPitch.textContent = pitch.toFixed(1) + '°';
+  heroYaw.textContent   = yaw.toFixed(1) + '°';
+}
 </script>
 </html>
