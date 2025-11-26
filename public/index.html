@@ -138,13 +138,66 @@ const ground = new THREE.Mesh(
 ground.rotation.x = -Math.PI/2;
 scene.add(ground);
 
-// Objeto principal
-const box = new THREE.Mesh(
-  new THREE.BoxGeometry(0.8,0.18,0.5),
-  new THREE.MeshStandardMaterial({ metalness:0.2, roughness:0.6 })
+//----------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+// --- Vehículo / AGV 3D ---
+// Grupo principal del vehículo
+const car = new THREE.Group();
+
+// Chasis
+const chassis = new THREE.Mesh(
+  new THREE.BoxGeometry(1.2, 0.25, 0.6),   // largo, alto, ancho
+  new THREE.MeshStandardMaterial({ color: 0x3b82f6, metalness: 0.4, roughness: 0.5 })
 );
-box.position.y = 0.09;
-scene.add(box);
+chassis.position.y = 0.2;
+car.add(chassis);
+
+// Cabina / módulo superior
+const cabin = new THREE.Mesh(
+  new THREE.BoxGeometry(0.6, 0.25, 0.5),
+  new THREE.MeshStandardMaterial({ color: 0x1d4ed8, metalness: 0.4, roughness: 0.5 })
+);
+cabin.position.set(0.0, 0.45, 0.0);
+car.add(cabin);
+
+// “Sensor” frontal (simula LIDAR / cámara)
+const sensor = new THREE.Mesh(
+  new THREE.CylinderGeometry(0.05, 0.05, 0.12, 16),
+  new THREE.MeshStandardMaterial({ color: 0xffc857, metalness: 0.4, roughness: 0.4 })
+);
+sensor.rotation.z = Math.PI / 2;
+sensor.position.set(0.6, 0.35, 0);
+car.add(sensor);
+
+// Material para ruedas
+const wheelMat = new THREE.MeshStandardMaterial({ color: 0x111111, metalness: 0.1, roughness: 0.9 });
+
+// Geometría rueda (cilindro “tumbado”)
+const wheelGeo = new THREE.CylinderGeometry(0.16, 0.16, 0.14, 24);
+
+// Función helper para crear rueda en (x,z)
+function makeWheel(x, z) {
+  const w = new THREE.Mesh(wheelGeo, wheelMat);
+  w.rotation.z = Math.PI / 2;   // eje de giro hacia delante
+  w.position.set(x, 0.12, z);
+  return w;
+}
+
+// 4 ruedas
+const wheelFL = makeWheel( 0.45,  0.26); // front-left
+const wheelFR = makeWheel( 0.45, -0.26); // front-right
+const wheelRL = makeWheel(-0.45,  0.26); // rear-left
+const wheelRR = makeWheel(-0.45, -0.26); // rear-right
+
+car.add(wheelFL, wheelFR, wheelRL, wheelRR);
+
+// Añadir vehículo a la escena
+scene.add(car);
+
+// Este será el objeto controlado por la IMU
+const box = car;
+
+//----------------------------------------------------------------------------------------------------------------------------------------------------------------
 
 // Ejes fijos en el mundo
 const axes = new THREE.AxesHelper(1.2);
@@ -163,26 +216,24 @@ addEventListener('resize', resize); resize();
 
 function imuQuatToThree(arr){
   let a = arr.map(Number);
-  let w,x,y,z;
+  let w, x, y, z;
 
   // Detecta [w,x,y,z] vs [x,y,z,w]
   if (Math.abs(a[0]) >= Math.max(Math.abs(a[1]), Math.abs(a[2]), Math.abs(a[3]))) {
-    [w,x,y,z] = a;          // [w,x,y,z]
+    [w, x, y, z] = a;           // formato [w,x,y,z]
   } else {
-    [x,y,z,w] = a;          // [x,y,z,w]
+    [x, y, z, w] = a;           // formato [x,y,z,w] (el tuyo)
   }
 
-  // --- Remapeo pedido: x→y, y→z, z→x ---
-  // Y además invertir X y Z (estaban al revés)
-  let nx = - y;  // X final = -Y del sensor
-  let ny = z;  // Y final =  Z del sensor
-  let nz = -x;  // Z final = -X del sensor
-
-  // --- NED → ENU (Three): invierte Y y Z del marco final ---
-  
+  // Remapeo a ejes de Three (carro apuntando a +X)
+  // Partimos de la base que te funcionaba mejor y aplicamos los signos
+  let nx = ( -y);
+  let ny = ( z);
+  let nz = ( -x);
 
   return new THREE.Quaternion(nx, ny, nz, w).normalize();
 }
+
 
 
 
@@ -204,8 +255,17 @@ document.getElementById('btnCenter').onclick = ()=>{
   camera.position.set(1.6,1.1,1.8);
   controls.target.copy(box.position); controls.update();
 };
-let zeroQ = new THREE.Quaternion();
-document.getElementById('btnZero').onclick = ()=>{ zeroQ.copy(box.quaternion).invert(); };
+
+let zeroQ = new THREE.Quaternion();   // offset de referencia
+let lastWorldQ = new THREE.Quaternion(); // última orientación cruda
+let hasZero = false;                  // indica si ya se ha fijado un cero
+
+
+document.getElementById('btnZero').onclick = () => {
+  // Usar la orientación cruda del sensor en este momento como referencia
+  zeroQ.copy(lastWorldQ).invert();
+  hasZero = true;
+};
 
 /* --- WebSocket --- */
 const ws = new WebSocket(`ws://${location.host}/ws`);
@@ -235,9 +295,21 @@ ws.onmessage = (ev)=>{
 function applyQuat(arr){ setOrientation(imuQuatToThree(arr)); }
 
 function setOrientation(qWorld){
-  const q = qWorld.clone().premultiply(zeroQ);
+  // Guardamos siempre la orientación cruda que viene del sensor
+  lastWorldQ.copy(qWorld);
+
+  // Partimos de la orientación cruda
+  let q = qWorld.clone();
+
+  // Si se ha pulsado "Poner a cero", aplicamos el offset
+  if (hasZero) {
+    q.premultiply(zeroQ);
+  }
+
+  // Aplicar al coche
   box.quaternion.copy(q);
 
+  // Cálculo de Euler para mostrar en pantalla
   const e = new THREE.Euler().setFromQuaternion(q,'ZYX');
   const roll  = THREE.MathUtils.radToDeg(e.z);
   const pitch = THREE.MathUtils.radToDeg(e.y);
@@ -252,5 +324,7 @@ function setOrientation(qWorld){
   heroPitch.textContent = pitch.toFixed(1) + '°';
   heroYaw.textContent   = yaw.toFixed(1) + '°';
 }
+
+
 </script>
 </html>
