@@ -50,6 +50,13 @@
   .hero .lbl{display:block;font:700 12px/1 ui-monospace,Consolas;color:#9fb3ff}
   .hero .num{font:800 28px/1.1 ui-monospace,Consolas;color:#eaf1ff}
   .hero .deg{font-size:.6em;opacity:.7;margin-left:4px}
+  
+  .alarm-on{
+    color: var(--err);
+    font-weight: 600;
+  }
+
+
 </style>
 
 <header>
@@ -89,6 +96,13 @@
         <div class="k">Frecuencia</div><div><span id="freq">—</span> Hz</div>
         <div class="k">Muestreo</div><div><span id="lat">—</span> ms</div>
       </div>
+
+      <div class="kv" style="margin-bottom:14px">
+        <div class="k">Frecuencia</div><div><span id="freq">—</span> Hz</div>
+        <div class="k">Muestreo</div><div><span id="lat">—</span> ms</div>
+        <div class="k">Alarma</div><div id="alarmTxt">OK</div>
+      </div>
+
 
       <h3 style="margin:8px 0 6px;font-size:14px;color:#9aa8c7">Ángulos (ZYX)</h3>
       <div class="kv mono" style="margin-bottom:14px">
@@ -197,6 +211,10 @@ scene.add(car);
 // Este será el objeto controlado por la IMU
 const box = car;
 
+// Quaterniones para interpolar suavemente
+let currentQ = new THREE.Quaternion().copy(box.quaternion);
+let targetQ  = new THREE.Quaternion().copy(box.quaternion);
+
 //----------------------------------------------------------------------------------------------------------------------------------------------------------------
 
 // Ejes fijos en el mundo
@@ -211,8 +229,19 @@ function resize(){
   const w = cont.clientWidth||window.innerWidth, h = 560;
   renderer.setSize(w,h); camera.aspect = w/h; camera.updateProjectionMatrix();
 }
+
 addEventListener('resize', resize); resize();
-(function loop(){ controls.update(); renderer.render(scene,camera); requestAnimationFrame(loop); })();
+(function loop(){ 
+  controls.update();
+
+  // Interpolación suave entre la orientación actual y la objetivo
+  // 0.15 = rapidez de seguimiento (0.1 más suave, 0.3 más rápido)
+  currentQ.slerp(targetQ, 0.5);
+  box.quaternion.copy(currentQ);
+
+  renderer.render(scene,camera); 
+  requestAnimationFrame(loop); 
+})();
 
 function imuQuatToThree(arr){
   let a = arr.map(Number);
@@ -249,6 +278,8 @@ const latEl = document.getElementById('lat');
 const heroRoll = document.getElementById('heroRoll');
 const heroPitch = document.getElementById('heroPitch');
 const heroYaw = document.getElementById('heroYaw');
+const alarmTxt = document.getElementById('alarmTxt');
+
 
 /* --- Controles --- */
 document.getElementById('btnCenter').onclick = ()=>{
@@ -277,11 +308,16 @@ let last = performance.now(), count = 0, lastShow = last;
 
 ws.onmessage = (ev)=>{
   const t = performance.now(); count++;
-  if (t - lastShow > 1000){ freqEl.textContent = count.toFixed(0); latEl.textContent = (t - last).toFixed(0); count = 0; lastShow = t; }
+  if (t - lastShow > 1000){
+    freqEl.textContent = count.toFixed(0);
+    latEl.textContent = (t - last).toFixed(0);
+    count = 0; lastShow = t;
+  }
   last = t;
 
   try{
     const m = JSON.parse(ev.data);
+
     if (Array.isArray(m.quat))      applyQuat(m.quat);
     else if ('qw' in m)             applyQuat([m.qw,m.qx,m.qy,m.qz]);
     else if (Array.isArray(m.euler)){
@@ -289,27 +325,31 @@ ws.onmessage = (ev)=>{
       const e = new THREE.Euler(y,p,r,'ZYX');
       setOrientation(new THREE.Quaternion().setFromEuler(e));
     }
+
+    // NUEVO: estado de alarma
+    if (typeof m.alarm !== 'undefined'){
+      updateAlarmUI(!!m.alarm);
+    }
+
   }catch{}
 };
+
 
 function applyQuat(arr){ setOrientation(imuQuatToThree(arr)); }
 
 function setOrientation(qWorld){
-  // Guardamos siempre la orientación cruda que viene del sensor
+  // Guardamos para el "poner a cero"
   lastWorldQ.copy(qWorld);
 
-  // Partimos de la orientación cruda
   let q = qWorld.clone();
-
-  // Si se ha pulsado "Poner a cero", aplicamos el offset
   if (hasZero) {
     q.premultiply(zeroQ);
   }
 
-  // Aplicar al coche
-  box.quaternion.copy(q);
+  // En vez de aplicar directamente al modelo, actualizamos el objetivo
+  targetQ.copy(q);
 
-  // Cálculo de Euler para mostrar en pantalla
+  // Para los textos de roll/pitch/yaw usamos la misma q
   const e = new THREE.Euler().setFromQuaternion(q,'ZYX');
   const roll  = THREE.MathUtils.radToDeg(e.z);
   const pitch = THREE.MathUtils.radToDeg(e.y);
@@ -324,6 +364,18 @@ function setOrientation(qWorld){
   heroPitch.textContent = pitch.toFixed(1) + '°';
   heroYaw.textContent   = yaw.toFixed(1) + '°';
 }
+
+
+function updateAlarmUI(on){
+  if(on){
+    alarmTxt.textContent = 'ALARMA';
+    alarmTxt.classList.add('alarm-on');
+  } else {
+    alarmTxt.textContent = 'OK';
+    alarmTxt.classList.remove('alarm-on');
+  }
+}
+
 
 
 </script>
