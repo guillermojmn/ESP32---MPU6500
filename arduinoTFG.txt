@@ -1,0 +1,318 @@
+#include <Wire.h>
+#include <WiFi.h>
+#include <MPU6500_WE.h>
+#include <math.h>
+
+// --- Config por defecto ---
+#define I2C_SDA 21
+#define I2C_SCL 22
+#define BAUDRATE 115200
+int   SAMPLE_HZ     = 60;       // 10/25/30/50 ajustable
+float DEAD_BAND_DEG = 0.2f;     // no enviar si cambio < deadband
+unsigned long max_silence_ms = 60;  // como máximo 1 mensaje cada 60 ms ~ 16 Hz
+
+
+// --- Wifi / red ---
+const char* WIFI_SSID  = "";
+const char* WIFI_PASS  = "";
+const char* SERVER_IP  = "";    // IP de tu PC
+const uint16_t SERVER_PORT = 9000;          // puerto TCP donde escucha Node
+
+WiFiClient client;  // cliente TCP hacia tu servidor
+
+// --- Estado IMU ---
+MPU6500_WE* mpu = nullptr;
+uint8_t detectedAddr = 0x00;
+
+// --- Estado orientación + alarmas ---
+const int LED_PIN    = 2;   // LED integrado ESP32
+const int BUZZER_PIN = 15;  // <-- CAMBIA ESTO si usas otro pin para el buzzer
+
+unsigned long last_ms        = 0;
+unsigned long last_print_ms  = 0;
+
+const float ALPHA = 0.98f;      // filtro complementario
+float roll_deg = 0, pitch_deg = 0, yaw_deg = 0;
+float roll0 = 0, pitch0 = 0, yaw0 = 0;
+float last_print_roll = 0, last_print_pitch = 0, last_print_yaw = 0;
+
+bool VERBOSE = false;
+
+// Umbrales de alarma
+const float ALARM_TILT_DEG = 30.0f; // inclinación peligrosa en grados
+const float ALARM_ACC_G    = 1.8f;  // pico de aceleración (en "g" aprox.)
+
+// --- Utils ---
+bool i2cPresent(uint8_t addr){
+  Wire.beginTransmission(addr);
+  return Wire.endTransmission()==0;
+}
+
+void eulerDegToQuatZYX(float roll_d, float pitch_d, float yaw_d,
+                       float &qx, float &qy, float &qz, float &qw){
+  float rx=roll_d*(PI/180.0f), ry=pitch_d*(PI/180.0f), rz=yaw_d*(PI/180.0f);
+  float cx=cosf(rx*0.5f), sx=sinf(rx*0.5f);
+  float cy=cosf(ry*0.5f), sy=sinf(ry*0.5f);
+  float cz=cosf(rz*0.5f), sz=sinf(rz*0.5f);
+  qw=cz*cy*cx + sz*sy*sx;
+  qx=cz*cy*sx - sz*sy*cx;
+  qy=cz*sy*cx + sz*cy*sx;
+  qz=sz*cy*cx - cz*sy*sx;
+}
+
+void resetAllAxes(){
+  roll0 = roll_deg;
+  pitch0 = pitch_deg;
+  yaw0 = yaw_deg;
+
+  last_print_roll  = 0;
+  last_print_pitch = 0;
+  last_print_yaw   = 0;
+
+  Serial.println(F("# ZERO: roll=pitch=yaw=0"));
+}
+
+bool initMPU(uint8_t addr){
+  detectedAddr = addr;
+  mpu = new MPU6500_WE(detectedAddr);
+  if(!mpu->init()) return false;
+
+  mpu->setAccRange(MPU6500_ACC_RANGE_2G);
+  mpu->setGyrRange(MPU6500_GYRO_RANGE_250);
+  mpu->enableGyrDLPF();
+  mpu->setGyrDLPF(MPU6500_DLPF_6);
+  mpu->setAccDLPF(MPU6500_DLPF_6);
+  mpu->setSampleRateDivider(4);        // ~200 Hz interno
+  mpu->autoOffsets();                  // deja la IMU quieta ~2s
+  resetAllAxes();
+  return true;
+}
+
+void printHelp(){
+  Serial.println(F("# Controles:"));
+  Serial.println(F("#  r  -> recentrar referencia (roll/pitch de accel, yaw=0)"));
+  Serial.println(F("#  v  -> toggle verboso (añade euler, accel, gyro, temp)"));
+  Serial.println(F("#  1/2/3 -> 10/25/50 Hz"));
+  Serial.println(F("#  + / - -> subir/bajar deadband en 0.2° (actual en grados)"));
+  Serial.print(F("#  DEAD_BAND_DEG=")); Serial.println(DEAD_BAND_DEG,2);
+  Serial.print(F("#  SAMPLE_HZ=")); Serial.println(SAMPLE_HZ);
+}
+
+// Encender/apagar alarma (LED integrado + buzzer)
+void setAlarm(bool on){
+  static bool alarmOn = false;
+  if(on == alarmOn) return;   // no hacemos nada si no cambia
+
+  alarmOn = on;
+  digitalWrite(LED_PIN,   on ? HIGH : LOW);
+  digitalWrite(BUZZER_PIN, on ? HIGH : LOW);
+}
+
+void setup(){
+  pinMode(LED_PIN, OUTPUT);
+  pinMode(BUZZER_PIN, OUTPUT);
+  setAlarm(false);  // empezamos sin alarma
+
+  Serial.begin(BAUDRATE);
+  delay(1200);
+
+  Wire.begin(I2C_SDA, I2C_SCL);
+  Wire.setClock(100000); // 100 kHz robusto
+
+  bool ok=false;
+  if(i2cPresent(0x68))      ok=initMPU(0x68);
+  else if(i2cPresent(0x69)) ok=initMPU(0x69);
+
+  if(!ok){
+    Serial.println(F("# ERROR: MPU6500 no detectado o init() fallo. Revisa NCS->3V3, AD0->GND, SDA->21, SCL->22, VCC 3V3, GND."));
+    while(true){
+      digitalWrite(LED_PIN,!digitalRead(LED_PIN));
+      delay(150);
+    }
+  }
+
+  last_ms       = millis();
+  last_print_ms = last_ms;
+  Serial.print(F("# OK MPU6500 en 0x"));
+  if(detectedAddr<16) Serial.print('0');
+  Serial.println(detectedAddr,HEX);
+  Serial.println(F("# Formato por defecto (NDJSON): {\"t\":ms,\"quat\":[x,y,z,w],\"alarm\":0/1}"));
+  printHelp();
+
+  // --- Conexión WiFi ---
+  Serial.println(F("# Conectando a WiFi..."));
+  WiFi.begin(WIFI_SSID, WIFI_PASS);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print('.');
+  }
+  Serial.println();
+  Serial.print(F("# WiFi OK. IP ESP32: "));
+  Serial.println(WiFi.localIP());
+
+  // --- Conexión TCP al servidor (tu PC) ---
+  Serial.print(F("# Conectando a servidor "));
+  Serial.print(SERVER_IP);
+  Serial.print(':');
+  Serial.println(SERVER_PORT);
+
+  if (!client.connect(SERVER_IP, SERVER_PORT)) {
+    Serial.println(F("# ERROR: no se pudo conectar al servidor TCP"));
+  } else {
+    Serial.println(F("# Servidor TCP conectado"));
+  }
+}
+
+void loop(){
+  // periodicidad
+  unsigned long now = millis();
+  unsigned long period_ms = (unsigned long)(1000.0f / SAMPLE_HZ);
+  if(now - last_ms < period_ms) { return; }
+  float dt = (now - last_ms) / 1000.0f;
+  last_ms = now;
+  if(dt<=0) dt = 1.0f / SAMPLE_HZ;
+
+  // lecturas IMU
+  xyzFloat a = mpu->getGValues();    // g
+  xyzFloat g = mpu->getGyrValues();  // deg/s
+
+  // euler desde acelerómetro
+  float ax=a.x, ay=a.y, az=a.z;
+  float roll_acc  = atan2f(ay, az) * 180.0f / PI;
+  float pitch_acc = atan2f(-ax, sqrtf(ay*ay + az*az)) * 180.0f / PI;
+
+  // integración gyro
+  float roll_gyro  = roll_deg  + g.x * dt;
+  float pitch_gyro = pitch_deg + g.y * dt;
+  float yaw_gyro   = yaw_deg   + g.z * dt; // yaw relativo (deriva)
+
+  // filtro complementario
+  roll_deg  = ALPHA * roll_gyro  + (1.0f-ALPHA) * roll_acc;
+  pitch_deg = ALPHA * pitch_gyro + (1.0f-ALPHA) * pitch_acc;
+  yaw_deg   = yaw_gyro;
+
+  // relativos a baseline
+  float r_rel = roll_deg  - roll0;
+  float p_rel = pitch_deg - pitch0;
+  float y_rel = yaw_deg   - yaw0;
+
+  // --- Lógica de alarma ---
+  // 1) inclinación excesiva
+  bool alarmTilt = (fabsf(r_rel) > ALARM_TILT_DEG) || (fabsf(p_rel) > ALARM_TILT_DEG);
+
+  // 2) pico de aceleración (norma del vector a)
+  float accNorm = sqrtf(ax*ax + ay*ay + az*az);  // en "g"
+  bool alarmShock = accNorm > ALARM_ACC_G;
+
+  bool alarm = alarmTilt || alarmShock;
+  setAlarm(alarm);
+
+  // deadband (solo enviar si cambia lo suficiente o cada max_silence_ms)
+ /* bool moved =
+    (fabsf(r_rel - last_print_roll)  >= DEAD_BAND_DEG) ||
+    (fabsf(p_rel - last_print_pitch) >= DEAD_BAND_DEG) ||
+    (fabsf(y_rel - last_print_yaw)   >= DEAD_BAND_DEG);
+
+  bool force = (now - last_print_ms) >= max_silence_ms;
+  if(!(moved || force)) return;*/
+
+  last_print_roll  = r_rel;
+  last_print_pitch = p_rel;
+  last_print_yaw   = y_rel;
+  last_print_ms    = now;
+
+  // cuaternión (relativo)
+  float qx,qy,qz,qw;
+  eulerDegToQuatZYX(r_rel, p_rel, y_rel, qx,qy,qz,qw);
+
+  // --- Construir JSON en un String ---
+  String payload;
+  payload.reserve(256);
+
+  payload += '{';
+  payload += "\"t\":";
+  payload += now;
+  payload += ",\"quat\":[";
+  payload += String(qx, 6); payload += ",";
+  payload += String(qy, 6); payload += ",";
+  payload += String(qz, 6); payload += ",";
+  payload += String(qw, 6); payload += "]";
+
+  // Campo de alarma (0/1) siempre presente
+  payload += ",\"alarm\":";
+  payload += alarm ? "1" : "0";
+
+  if(VERBOSE){
+    float rr = r_rel*(PI/180.0f), pr = p_rel*(PI/180.0f), yr = y_rel*(PI/180.0f);
+    payload += ",\"euler_rad\":{";
+    payload += "\"roll\":";  payload += String(rr, 6);
+    payload += ",\"pitch\":"; payload += String(pr, 6);
+    payload += ",\"yaw\":";   payload += String(yr, 6);
+    payload += "}";
+
+    payload += ",\"acc_g\":[";
+    payload += String(ax,4); payload += ",";
+    payload += String(ay,4); payload += ",";
+    payload += String(az,4); payload += "]";
+
+    payload += ",\"gyro_dps\":[";
+    payload += String(g.x,2); payload += ",";
+    payload += String(g.y,2); payload += ",";
+    payload += String(g.z,2); payload += "]";
+
+    payload += ",\"temp_c\":";
+    payload += String(mpu->getTemperature(),2);
+  }
+
+  payload += '}';
+
+  // Enviar por Serial (para depurar)
+  Serial.println(payload);
+
+  // Enviar por TCP al servidor si la conexión está viva
+  if (client.connected()) {
+    client.println(payload);
+  } else {
+    // intento de reconexión simple cada 2 s
+    static unsigned long lastReconnect = 0;
+    if (millis() - lastReconnect > 2000) {
+      lastReconnect = millis();
+      Serial.println(F("# Intentando reconectar TCP..."));
+      if (client.connect(SERVER_IP, SERVER_PORT)) {
+        Serial.println(F("# Reconexion TCP OK"));
+        client.println(payload);  // enviamos el dato actual
+      } else {
+        Serial.println(F("# Reconexion TCP FALLIDA"));
+      }
+    }
+  }
+
+  // comandos serie
+  while(Serial.available()){
+    char c = Serial.read();
+    if(c=='r'||c=='R'){
+       resetAllAxes();
+    }
+    else if(c=='v'||c=='V'){
+      VERBOSE=!VERBOSE;
+      Serial.print(F("# verbose="));
+      Serial.println(VERBOSE?"on":"off");
+    }
+    else if(c=='1'){ SAMPLE_HZ=10; Serial.println(F("# fps=10")); }
+    else if(c=='2'){ SAMPLE_HZ=25; Serial.println(F("# fps=25")); }
+    else if(c=='3'){ SAMPLE_HZ=50; Serial.println(F("# fps=50")); }
+    else if(c=='+'){
+      DEAD_BAND_DEG += 0.2f;
+      Serial.print(F("# deadband="));
+      Serial.println(DEAD_BAND_DEG,2);
+    }
+    else if(c=='-'){
+      DEAD_BAND_DEG = max(0.0f, DEAD_BAND_DEG-0.2f);
+      Serial.print(F("# deadband="));
+      Serial.println(DEAD_BAND_DEG,2);
+    }
+    else if(c=='h'||c=='H'){
+      printHelp();
+    }
+  }
+}
