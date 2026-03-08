@@ -77,7 +77,7 @@ node server.js
 
 Abrir un navegador web y acceder a:
 
-http://localhost:8800
+http://localhost:8080
 
 Si la ESP32 está conectada correctamente, la interfaz mostrará la representación 3D del vehículo y los datos se actualizarán en tiempo real.
 
